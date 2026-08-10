@@ -1,0 +1,15 @@
+{
+  "name": "La Pastella",
+  "short_name": "La Pastella",
+  "description": "Pasta fresca all'uovo fatta a mano.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FBF3E3",
+  "theme_color": "#4A2E1E",
+  "lang": "it-IT",
+  "icons": [
+    {"src":"/icons/icon.svg","sizes":"any","type":"image/svg+xml","purpose":"any maskable"}
+  ]
+}
