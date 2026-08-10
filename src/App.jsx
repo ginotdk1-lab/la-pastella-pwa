@@ -1,10 +1,11 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { supabase } from "./supabaseClient";
 import {
   Wheat, MapPin, Phone, ShoppingBag, Search, Plus, Minus, X, Trash2,
   Clock, CalendarDays, Lock, LayoutDashboard, Package, Timer, CalendarX,
   Settings as SettingsIcon, LogOut, ChevronRight, Check, AlertCircle,
-  History, RotateCcw, CalendarPlus, Navigation
+  History, RotateCcw, CalendarPlus, Navigation, BellRing,
+  Users, ImagePlus, User
 } from "lucide-react";
 
 /* ---------- helpers ---------- */
@@ -45,7 +46,7 @@ const SEED_PRODUCTS = [
   { name: "Lasagne ai funghi", category: "Lasagne", price: 22, desc: "" },
   { name: "Lasagne ai carciofi", category: "Lasagne", price: 22, desc: "" },
   { name: "Rosette", category: "Pasta ripiena", price: 22, desc: "" },
-].map((p, i) => ({ id: uid(), unit: "kg", available: true, order: i, ...p }));
+].map((p, i) => ({ id: uid(), unit: "kg", available: true, order: i, image: "", ...p }));
 
 const SEED_SLOTS = [
   "07:30-08:00", "08:00-08:30", "08:30-09:00", "09:00-09:30", "09:30-10:00",
@@ -101,6 +102,58 @@ async function savePersonal(key, value) {
   return value;
 }
 
+async function uploadProductImage(file) {
+  const ext = file.name.split(".").pop();
+  const path = `${uid()}.${ext}`;
+  const { error } = await supabase.storage.from("product-images").upload(path, file, { upsert: true });
+  if (error) throw error;
+  const { data } = supabase.storage.from("product-images").getPublicUrl(path);
+  return data.publicUrl;
+}
+
+function useAlarm() {
+  const audioRef = useRef(null);
+  const beepRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+
+  const stop = useCallback(() => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null; }
+    if (beepRef.current) { beepRef.current.stop(); beepRef.current = null; }
+    setPlaying(false);
+  }, []);
+
+  const start = useCallback((customSrc) => {
+    if (audioRef.current || beepRef.current) return;
+    if (customSrc) {
+      const audio = new Audio(customSrc);
+      audio.loop = true;
+      audio.play().catch(() => {});
+      audioRef.current = audio;
+    } else {
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        const ctx = new Ctx();
+        const beep = () => {
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.frequency.value = 880;
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          gain.gain.setValueAtTime(0.25, ctx.currentTime);
+          osc.start();
+          osc.stop(ctx.currentTime + 0.35);
+        };
+        beep();
+        const interval = setInterval(beep, 800);
+        beepRef.current = { stop: () => { clearInterval(interval); ctx.close(); } };
+      } catch {}
+    }
+    setPlaying(true);
+  }, []);
+
+  return { playing, start, stop };
+}
+
 /* ---------- root ---------- */
 export default function App() {
   const [ready, setReady] = useState(false);
@@ -116,30 +169,71 @@ export default function App() {
   const [managerAuthed, setManagerAuthed] = useState(false);
   const [lastOrder, setLastOrder] = useState(null);
   const [toast, setToast] = useState("");
+  const [profile, setProfile] = useState(null);
+  const [customers, setCustomers] = useState([]);
+  const [managerSound, setManagerSound] = useState(null);
+  const managerAlarm = useAlarm();
+  const customerAlarm = useAlarm();
+  const seenOrderIds = useRef(null);
+  const seenReadyIds = useRef(null);
 
   useEffect(() => {
     (async () => {
-      const [s, p, sl, cl, ord, ct] = await Promise.all([
+      const [s, p, sl, cl, ord, ct, prof, custs, snd] = await Promise.all([
         loadShared("pastella:settings", null),
         loadShared("pastella:products", null),
         loadShared("pastella:slots", null),
         loadShared("pastella:closures", []),
         loadShared("pastella:orders", []),
         loadPersonal("pastella:clientToken", null),
+        loadPersonal("pastella:profile", null),
+        loadShared("pastella:customers", []),
+        loadPersonal("pastella:managerSound", null),
       ]);
       setSettings(s || (await saveShared("pastella:settings", DEFAULT_SETTINGS)));
       setProducts(p || (await saveShared("pastella:products", SEED_PRODUCTS)));
       setSlots(sl || (await saveShared("pastella:slots", SEED_SLOTS)));
       setClosures(cl);
       setOrders(ord);
+      setCustomers(custs);
+      setManagerSound(snd);
       const token = ct || uid();
       if (!ct) await savePersonal("pastella:clientToken", token);
       setClientToken(token);
       const c = await loadPersonal(`pastella:cart:${token}`, []);
       setCart(c);
+      setProfile(prof);
+      seenOrderIds.current = new Set(ord.map((o) => o.id));
+      seenReadyIds.current = new Set(ord.filter((o) => o.status === "Pronto").map((o) => o.id));
       setReady(true);
     })();
   }, []);
+
+  useEffect(() => {
+    if (!ready) return;
+    const interval = setInterval(async () => {
+      const latest = await loadShared("pastella:orders", []);
+      setOrders(latest);
+
+      if (managerAuthed) {
+        const fresh = latest.filter((o) => !seenOrderIds.current.has(o.id));
+        if (fresh.length > 0) {
+          fresh.forEach((o) => seenOrderIds.current.add(o.id));
+          managerAlarm.start(managerSound);
+        }
+      } else {
+        latest.forEach((o) => seenOrderIds.current.add(o.id));
+      }
+
+      const myReady = latest.filter((o) => o.clientToken === clientToken && o.status === "Pronto");
+      const freshReady = myReady.filter((o) => !seenReadyIds.current.has(o.id));
+      if (freshReady.length > 0) {
+        freshReady.forEach((o) => seenReadyIds.current.add(o.id));
+        customerAlarm.start(null);
+      }
+    }, 7000);
+    return () => clearInterval(interval);
+  }, [ready, managerAuthed, managerSound, clientToken]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -203,6 +297,22 @@ export default function App() {
     );
   }
 
+  if (!profile) {
+    return (
+      <Onboarding
+        onSubmit={async (data) => {
+          const p = { ...data, clientToken, createdAt: new Date().toISOString() };
+          await savePersonal("pastella:profile", p);
+          setProfile(p);
+          const latestCustomers = await loadShared("pastella:customers", []);
+          const nextCustomers = [...latestCustomers.filter((c) => c.clientToken !== clientToken), p];
+          await saveShared("pastella:customers", nextCustomers);
+          setCustomers(nextCustomers);
+        }}
+      />
+    );
+  }
+
   return (
     <div
       className="min-h-screen w-full pb-20"
@@ -221,6 +331,23 @@ export default function App() {
           style={{ background: "#4A2E1E", color: "#FBF3E3" }}
         >
           <Check size={14} /> {toast}
+        </div>
+      )}
+
+      {(managerAlarm.playing || customerAlarm.playing) && (
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 flex flex-col gap-2 items-center">
+          {managerAlarm.playing && (
+            <div className="px-4 py-2.5 rounded-full text-sm font-semibold shadow-lg flex items-center gap-2" style={{ background: "#B5533C", color: "#fff" }}>
+              <BellRing size={15} /> Nuovo ordine!
+              <button onClick={managerAlarm.stop} className="ml-1 underline text-xs">Ferma suono</button>
+            </div>
+          )}
+          {customerAlarm.playing && (
+            <div className="px-4 py-2.5 rounded-full text-sm font-semibold shadow-lg flex items-center gap-2" style={{ background: "#3F6B3A", color: "#fff" }}>
+              <BellRing size={15} /> Il tuo ordine è pronto!
+              <button onClick={customerAlarm.stop} className="ml-1 underline text-xs">Ferma suono</button>
+            </div>
+          )}
         </div>
       )}
 
@@ -264,6 +391,7 @@ export default function App() {
             closures={closures}
             cartDetailed={cartDetailed}
             cartTotal={cartTotal}
+            profile={profile}
             onBack={() => setView("catalog")}
             onSubmit={async (form) => {
               const latest = await refreshOrders();
@@ -290,10 +418,18 @@ export default function App() {
                 notes: form.notes,
                 status: "Ricevuto",
                 createdAt: new Date().toISOString(),
+                clientCognome: profile?.cognome || "",
+                clientEta: profile?.eta || "",
               };
               const next = [...latest, order];
               await saveShared("pastella:orders", next);
-              setOrders(next);
+              const verify = await loadShared("pastella:orders", []);
+              if (!verify.find((o) => o.id === order.id)) {
+                showToast("Errore di connessione: l'ordine non è stato salvato. Riprova.");
+                return false;
+              }
+              setOrders(verify);
+              seenOrderIds.current.add(order.id);
               clearCart();
               setLastOrder(order);
               setView("confirmation");
@@ -332,6 +468,12 @@ export default function App() {
             setClosures={async (c) => setClosures(await saveShared("pastella:closures", c))}
             orders={orders}
             setOrders={async (o) => setOrders(await saveShared("pastella:orders", o))}
+            customers={customers}
+            managerSound={managerSound}
+            setManagerSound={async (dataUrl) => { await savePersonal("pastella:managerSound", dataUrl); setManagerSound(dataUrl); }}
+            onTestSound={() => managerAlarm.start(managerSound)}
+            onStopSound={managerAlarm.stop}
+            soundPlaying={managerAlarm.playing}
             onLogout={() => {
               setManagerAuthed(false);
               setView("home");
@@ -359,6 +501,39 @@ export default function App() {
       {view !== "manager" && view !== "manager-login" && (
         <BottomNav view={view} setView={setView} />
       )}
+    </div>
+  );
+}
+
+/* ---------- onboarding ---------- */
+function Onboarding({ onSubmit }) {
+  const [form, setForm] = useState({ nome: "", cognome: "", eta: "", telefono: "" });
+  const [submitting, setSubmitting] = useState(false);
+  const canSubmit = form.nome.trim() && form.cognome.trim() && form.eta && form.telefono.trim();
+  const submit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    await onSubmit(form);
+    setSubmitting(false);
+  };
+  return (
+    <div className="min-h-screen flex items-center justify-center px-6" style={{ background: "#FBF3E3" }}>
+      <div className="w-full max-w-sm rounded-3xl p-6" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+        <div className="w-12 h-12 rounded-full mx-auto mb-3 flex items-center justify-center" style={{ background: "#D9A441" }}>
+          <User size={20} color="#4A2E1E" />
+        </div>
+        <h2 className="font-display text-xl font-bold mb-1 text-center">Benvenuto!</h2>
+        <p className="text-xs mb-4 text-center" style={{ color: "#8A7458" }}>Inserisci i tuoi dati per iniziare a ordinare</p>
+        <div className="space-y-2.5">
+          <input placeholder="Nome" value={form.nome} onChange={(e) => setForm({ ...form, nome: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border text-sm outline-none" style={{ borderColor: "#E9D8AE" }} />
+          <input placeholder="Cognome" value={form.cognome} onChange={(e) => setForm({ ...form, cognome: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border text-sm outline-none" style={{ borderColor: "#E9D8AE" }} />
+          <input placeholder="Età" type="number" min="1" max="120" value={form.eta} onChange={(e) => setForm({ ...form, eta: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border text-sm outline-none" style={{ borderColor: "#E9D8AE" }} />
+          <input placeholder="Numero di cellulare" type="tel" value={form.telefono} onChange={(e) => setForm({ ...form, telefono: e.target.value })} className="w-full px-3 py-2.5 rounded-xl border text-sm outline-none" style={{ borderColor: "#E9D8AE" }} />
+        </div>
+        <button onClick={submit} disabled={!canSubmit || submitting} className="w-full py-3.5 rounded-2xl font-semibold mt-4 disabled:opacity-40" style={{ background: "#4A2E1E", color: "#FBF3E3" }}>
+          {submitting ? "Un attimo..." : "Continua"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -496,6 +671,11 @@ function Catalog({ products, settings, onAdd }) {
           const qty = getQty(p.id);
           return (
             <div key={p.id} className="p-4 rounded-2xl flex items-center gap-3" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE", opacity: disabled ? 0.55 : 1 }}>
+              {p.image && (
+                <div className="w-14 h-14 rounded-xl overflow-hidden flex-shrink-0">
+                  <img src={p.image} alt={p.name} className="w-full h-full object-cover" />
+                </div>
+              )}
               <div className="flex-1 min-w-0">
                 <p className="font-display font-semibold text-base truncate">{p.name}</p>
                 <p className="text-xs" style={{ color: "#B3A483" }}>{p.category}</p>
@@ -574,8 +754,15 @@ function CartSheet({ items, total, onClose, onQty, onRemove, onClear, onCheckout
 }
 
 /* ---------- checkout ---------- */
-function Checkout({ settings, slots, closures, cartDetailed, cartTotal, onBack, onSubmit }) {
-  const [form, setForm] = useState({ customerName: "", phone: "", email: "", notes: "", pickupDate: "", slotId: "" });
+function Checkout({ settings, slots, closures, cartDetailed, cartTotal, onBack, onSubmit, profile }) {
+  const [form, setForm] = useState({
+    customerName: profile ? `${profile.nome} ${profile.cognome}`.trim() : "",
+    phone: profile?.telefono || "",
+    email: "",
+    notes: "",
+    pickupDate: "",
+    slotId: "",
+  });
   const [orders, setOrders] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
@@ -816,11 +1003,12 @@ function ManagerLogin({ settings, onSuccess, onCancel }) {
 }
 
 /* ---------- manager panel ---------- */
-function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, setOrders, onLogout }) {
+function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, setOrders, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
   const [tab, setTab] = useState("dashboard");
   const tabs = [
     { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { key: "orders", label: "Ordini", icon: ShoppingBag },
+    { key: "clienti", label: "Clienti", icon: Users },
     { key: "products", label: "Prodotti", icon: Package },
     { key: "slots", label: "Fasce orarie", icon: Timer },
     { key: "closures", label: "Chiusure", icon: CalendarX },
@@ -844,11 +1032,22 @@ function ManagerPanel({ settings, setSettings, products, setProducts, slots, set
       </div>
 
       {tab === "dashboard" && <Dashboard orders={orders} />}
-      {tab === "orders" && <OrdersManager orders={orders} setOrders={setOrders} products={products} slots={slots} />}
+      {tab === "orders" && <OrdersManager orders={orders} setOrders={setOrders} products={products} slots={slots} customers={customers} />}
+      {tab === "clienti" && <CustomersManager customers={customers} orders={orders} />}
       {tab === "products" && <ProductsManager products={products} setProducts={setProducts} />}
       {tab === "slots" && <SlotsManager slots={slots} setSlots={setSlots} />}
       {tab === "closures" && <ClosuresManager closures={closures} setClosures={setClosures} />}
-      {tab === "settings" && <SettingsManager settings={settings} setSettings={setSettings} />}
+      {tab === "settings" && (
+        <SettingsManager
+          settings={settings}
+          setSettings={setSettings}
+          managerSound={managerSound}
+          setManagerSound={setManagerSound}
+          onTestSound={onTestSound}
+          onStopSound={onStopSound}
+          soundPlaying={soundPlaying}
+        />
+      )}
     </div>
   );
 }
@@ -897,21 +1096,26 @@ function Dashboard({ orders }) {
   );
 }
 
-function OrdersManager({ orders, setOrders, products, slots }) {
+function OrdersManager({ orders, setOrders, products, slots, customers }) {
   const sorted = [...orders].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const updateStatus = (id, status) => setOrders(orders.map((o) => (o.id === id ? { ...o, status } : o)));
+  const findCustomer = (clientToken) => (customers || []).find((c) => c.clientToken === clientToken);
   return (
     <div className="space-y-3">
       {sorted.length === 0 && <p className="text-sm" style={{ color: "#8A7458" }}>Nessun ordine ricevuto.</p>}
       {sorted.map((o) => {
         const slot = slots.find((s) => s.id === o.slotId);
+        const cust = findCustomer(o.clientToken);
         return (
           <div key={o.id} className="p-4 rounded-2xl" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
             <div className="flex justify-between mb-1">
               <p className="font-semibold text-sm">#{o.orderNumber} · {o.customerName}</p>
               <p className="text-sm font-semibold">{eur(o.total)}</p>
             </div>
-            <p className="text-xs mb-2" style={{ color: "#8A7458" }}>{o.phone} · {dateLabel(o.pickupDate)} · {slot?.label}</p>
+            <p className="text-xs mb-2" style={{ color: "#8A7458" }}>
+              {o.phone} · {dateLabel(o.pickupDate)} · {slot?.label}
+              {cust?.eta ? ` · ${cust.eta} anni` : ""}
+            </p>
             <div className="text-xs mb-2" style={{ color: "#8A7458" }}>
               {o.items.map((i) => {
                 const p = products.find((x) => x.id === i.productId);
@@ -929,10 +1133,35 @@ function OrdersManager({ orders, setOrders, products, slots }) {
   );
 }
 
+function CustomersManager({ customers, orders }) {
+  const list = [...(customers || [])].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  const countFor = (token) => orders.filter((o) => o.clientToken === token).length;
+  return (
+    <div className="space-y-2">
+      {list.length === 0 && <p className="text-sm" style={{ color: "#8A7458" }}>Nessun cliente registrato.</p>}
+      {list.map((c) => (
+        <div key={c.clientToken} className="p-4 rounded-2xl flex items-center gap-3" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+          <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: "#D9A441" }}>
+            <User size={16} color="#4A2E1E" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-sm truncate">{c.nome} {c.cognome}</p>
+            <p className="text-xs" style={{ color: "#8A7458" }}>{c.telefono} · {c.eta} anni</p>
+          </div>
+          <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: "#F3E6C4", color: "#8A6A1F" }}>
+            {countFor(c.clientToken)} ordini
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function ProductsManager({ products, setProducts }) {
   const [editing, setEditing] = useState(null);
-  const blank = { name: "", category: "", price: "", unit: "kg", desc: "", available: true, active: true };
+  const blank = { name: "", category: "", price: "", unit: "kg", desc: "", available: true, active: true, image: "" };
   const [form, setForm] = useState(blank);
+  const [uploading, setUploading] = useState(false);
   const categories = [...new Set(products.map((p) => p.category))];
 
   const save = () => {
@@ -946,14 +1175,37 @@ function ProductsManager({ products, setProducts }) {
     setForm(blank);
     setEditing(null);
   };
-  const edit = (p) => { setForm({ name: p.name, category: p.category, price: String(p.price), unit: p.unit, desc: p.desc || "", available: p.available, active: p.active !== false }); setEditing(p.id); };
+  const edit = (p) => { setForm({ name: p.name, category: p.category, price: String(p.price), unit: p.unit, desc: p.desc || "", available: p.available, active: p.active !== false, image: p.image || "" }); setEditing(p.id); };
   const remove = (id) => setProducts(products.filter((p) => p.id !== id));
   const toggleAvail = (id) => setProducts(products.map((p) => (p.id === id ? { ...p, available: !p.available } : p)));
+  const handleImage = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploading(true);
+    try {
+      const url = await uploadProductImage(file);
+      setForm((f) => ({ ...f, image: url }));
+    } catch (err) {
+      console.error(err);
+      alert("Caricamento immagine non riuscito. Controlla di aver creato il bucket 'product-images' su Supabase.");
+    }
+    setUploading(false);
+  };
 
   return (
     <div>
       <div className="p-4 rounded-2xl mb-4 space-y-2" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
         <p className="text-xs font-semibold uppercase tracking-wide mb-1" style={{ color: "#8A7458" }}>{editing ? "Modifica prodotto" : "Nuovo prodotto"}</p>
+        <div className="flex items-center gap-3">
+          <div className="w-16 h-16 rounded-xl overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ background: "#F5EFDD", border: "1px solid #E9D8AE" }}>
+            {form.image ? <img src={form.image} alt="" className="w-full h-full object-cover" /> : <ImagePlus size={18} color="#B3A483" />}
+          </div>
+          <label className="text-xs font-semibold px-3 py-2 rounded-lg cursor-pointer" style={{ background: "#F5EFDD", color: "#4A2E1E" }}>
+            {uploading ? "Caricamento..." : "Carica foto"}
+            <input type="file" accept="image/*" onChange={handleImage} disabled={uploading} className="hidden" />
+          </label>
+          {form.image && <button onClick={() => setForm((f) => ({ ...f, image: "" }))} className="text-xs font-semibold" style={{ color: "#8C3B3B" }}>Rimuovi</button>}
+        </div>
         <input placeholder="Nome" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className="w-full px-3 py-2 rounded-lg border text-sm outline-none" style={{ borderColor: "#E9D8AE" }} />
         <div className="flex gap-2">
           <input placeholder="Categoria" list="cats" value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} className="flex-1 px-3 py-2 rounded-lg border text-sm outline-none" style={{ borderColor: "#E9D8AE" }} />
@@ -970,6 +1222,9 @@ function ProductsManager({ products, setProducts }) {
       <div className="space-y-2">
         {products.sort((a, b) => a.order - b.order).map((p) => (
           <div key={p.id} className="flex items-center gap-3 p-3 rounded-xl" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+            <div className="w-10 h-10 rounded-lg overflow-hidden flex-shrink-0" style={{ background: "#F5EFDD" }}>
+              {p.image && <img src={p.image} alt="" className="w-full h-full object-cover" />}
+            </div>
             <div className="flex-1 min-w-0">
               <p className="font-semibold text-sm truncate">{p.name}</p>
               <p className="text-xs" style={{ color: "#8A7458" }}>{p.category} · {eur(p.price)}/kg</p>
@@ -1064,9 +1319,16 @@ function ClosuresManager({ closures, setClosures }) {
   );
 }
 
-function SettingsManager({ settings, setSettings }) {
+function SettingsManager({ settings, setSettings, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying }) {
   const [form, setForm] = useState(settings);
   const save = () => setSettings(form);
+  const handleSound = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setManagerSound(reader.result);
+    reader.readAsDataURL(file);
+  };
   const field = (key, label, type = "text") => (
     <div className="mb-3">
       <label className="text-xs font-semibold uppercase tracking-wide" style={{ color: "#8A7458" }}>{label}</label>
@@ -1091,7 +1353,21 @@ function SettingsManager({ settings, setSettings }) {
       {field("managerPasscode", "Codice accesso Gestore")}
       <button onClick={save} className="w-full py-3 rounded-2xl font-semibold mt-2" style={{ background: "#4A2E1E", color: "#FBF3E3" }}>Salva impostazioni</button>
 
-      <div className="mt-6 p-3 rounded-xl text-xs" style={{ background: "#F3E6C4", color: "#8A6A1F" }}>
+      <div className="mt-6 p-4 rounded-2xl" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+        <p className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color: "#8A7458" }}>Suoneria nuovi ordini</p>
+        <p className="text-xs mb-3" style={{ color: "#8A7458" }}>Carica un file audio dal tuo telefono (cerca nella cartella Suonerie/Musica). Suonerà in loop quando arriva un ordine, finché non lo fermi tu.</p>
+        <label className="inline-block text-xs font-semibold px-3 py-2 rounded-lg cursor-pointer mb-2" style={{ background: "#F5EFDD", color: "#4A2E1E" }}>
+          {managerSound ? "Cambia file audio" : "Carica file audio"}
+          <input type="file" accept="audio/*" onChange={handleSound} className="hidden" />
+        </label>
+        {managerSound && <button onClick={() => setManagerSound(null)} className="text-xs font-semibold ml-2" style={{ color: "#8C3B3B" }}>Rimuovi (usa suono predefinito)</button>}
+        <div className="flex gap-2 mt-2">
+          <button onClick={onTestSound} disabled={soundPlaying} className="text-xs font-semibold px-3 py-2 rounded-lg disabled:opacity-40" style={{ background: "#DEEBDA", color: "#3F6B3A" }}>Prova suono</button>
+          {soundPlaying && <button onClick={onStopSound} className="text-xs font-semibold px-3 py-2 rounded-lg" style={{ background: "#F1DCDC", color: "#8C3B3B" }}>Ferma</button>}
+        </div>
+      </div>
+
+      <div className="mt-4 p-3 rounded-xl text-xs" style={{ background: "#F3E6C4", color: "#8A6A1F" }}>
         <p className="font-semibold mb-1">Stato integrazioni</p>
         <p>✅ Ordini, fasce orarie, chiusure, prodotti: funzionanti e salvati.</p>
         <p>✅ Promemoria ritiro: link a Google Calendar funzionante.</p>
