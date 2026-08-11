@@ -111,6 +111,61 @@ async function uploadProductImage(file) {
   return data.publicUrl;
 }
 
+function orderFromRow(r) {
+  return {
+    id: r.id,
+    orderNumber: r.order_number,
+    clientToken: r.client_token,
+    customerName: r.customer_name,
+    phone: r.phone,
+    email: r.email,
+    pickupDate: r.pickup_date,
+    slotId: r.slot_id,
+    items: r.items,
+    total: r.total,
+    notes: r.notes,
+    status: r.status,
+    clientCognome: r.client_cognome,
+    clientEta: r.client_eta,
+    createdAt: r.created_at,
+  };
+}
+async function fetchOrders() {
+  try {
+    const { data, error } = await supabase.from("orders").select("*").order("created_at", { ascending: true });
+    if (error) throw error;
+    return (data || []).map(orderFromRow);
+  } catch (e) {
+    console.error("fetchOrders", e);
+    return [];
+  }
+}
+async function insertOrder(order) {
+  const row = {
+    id: order.id,
+    order_number: order.orderNumber,
+    client_token: order.clientToken,
+    customer_name: order.customerName,
+    phone: order.phone,
+    email: order.email,
+    pickup_date: order.pickupDate,
+    slot_id: order.slotId,
+    items: order.items,
+    total: order.total,
+    notes: order.notes,
+    status: order.status,
+    client_cognome: order.clientCognome,
+    client_eta: order.clientEta,
+    created_at: order.createdAt,
+  };
+  const { error } = await supabase.from("orders").insert(row);
+  if (error) throw error;
+}
+async function updateOrderStatus(id, status) {
+  const { error } = await supabase.from("orders").update({ status }).eq("id", id);
+  if (error) throw error;
+}
+
 function useAlarm() {
   const audioRef = useRef(null);
   const beepRef = useRef(null);
@@ -176,6 +231,7 @@ export default function App() {
   const customerAlarm = useAlarm();
   const seenOrderIds = useRef(null);
   const seenReadyIds = useRef(null);
+  const lastLocalOrderWrite = useRef(0);
 
   useEffect(() => {
     (async () => {
@@ -184,7 +240,7 @@ export default function App() {
         loadShared("pastella:products", null),
         loadShared("pastella:slots", null),
         loadShared("pastella:closures", []),
-        loadShared("pastella:orders", []),
+        fetchOrders(),
         loadPersonal("pastella:clientToken", null),
         loadPersonal("pastella:profile", null),
         loadShared("pastella:customers", []),
@@ -212,8 +268,10 @@ export default function App() {
   useEffect(() => {
     if (!ready) return;
     const interval = setInterval(async () => {
-      const latest = await loadShared("pastella:orders", []);
-      setOrders(latest);
+      const latest = await fetchOrders();
+      if (Date.now() - lastLocalOrderWrite.current > 4000) {
+        setOrders(latest);
+      }
 
       if (managerAuthed) {
         const fresh = latest.filter((o) => !seenOrderIds.current.has(o.id));
@@ -279,7 +337,7 @@ export default function App() {
   const cartTotal = useMemo(() => cartDetailed.reduce((s, i) => s + i.subtotal, 0), [cartDetailed]);
 
   const refreshOrders = async () => {
-    const latest = await loadShared("pastella:orders", []);
+    const latest = await fetchOrders();
     setOrders(latest);
     return latest;
   };
@@ -421,14 +479,15 @@ export default function App() {
                 clientCognome: profile?.cognome || "",
                 clientEta: profile?.eta || "",
               };
-              const next = [...latest, order];
-              await saveShared("pastella:orders", next);
-              const verify = await loadShared("pastella:orders", []);
-              if (!verify.find((o) => o.id === order.id)) {
+              try {
+                await insertOrder(order);
+              } catch (e) {
+                console.error(e);
                 showToast("Errore di connessione: l'ordine non è stato salvato. Riprova.");
                 return false;
               }
-              setOrders(verify);
+              lastLocalOrderWrite.current = Date.now();
+              setOrders([...latest, order]);
               seenOrderIds.current.add(order.id);
               clearCart();
               setLastOrder(order);
@@ -467,7 +526,17 @@ export default function App() {
             closures={closures}
             setClosures={async (c) => setClosures(await saveShared("pastella:closures", c))}
             orders={orders}
-            setOrders={async (o) => setOrders(await saveShared("pastella:orders", o))}
+            onUpdateStatus={async (id, status) => {
+              try {
+                await updateOrderStatus(id, status);
+              } catch (e) {
+                console.error(e);
+                showToast("Errore: impossibile aggiornare lo stato dell'ordine.");
+                return;
+              }
+              lastLocalOrderWrite.current = Date.now();
+              setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
+            }}
             customers={customers}
             managerSound={managerSound}
             setManagerSound={async (dataUrl) => { await savePersonal("pastella:managerSound", dataUrl); setManagerSound(dataUrl); }}
@@ -768,7 +837,7 @@ function Checkout({ settings, slots, closures, cartDetailed, cartTotal, onBack, 
   const [err, setErr] = useState("");
 
   useEffect(() => {
-    loadShared("pastella:orders", []).then(setOrders);
+    fetchOrders().then(setOrders);
   }, [form.pickupDate]);
 
   const minDate = todayISO();
@@ -1003,7 +1072,7 @@ function ManagerLogin({ settings, onSuccess, onCancel }) {
 }
 
 /* ---------- manager panel ---------- */
-function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, setOrders, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
+function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, onUpdateStatus, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
   const [tab, setTab] = useState("dashboard");
   const tabs = [
     { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -1032,7 +1101,7 @@ function ManagerPanel({ settings, setSettings, products, setProducts, slots, set
       </div>
 
       {tab === "dashboard" && <Dashboard orders={orders} />}
-      {tab === "orders" && <OrdersManager orders={orders} setOrders={setOrders} products={products} slots={slots} customers={customers} />}
+      {tab === "orders" && <OrdersManager orders={orders} onUpdateStatus={onUpdateStatus} products={products} slots={slots} customers={customers} />}
       {tab === "clienti" && <CustomersManager customers={customers} orders={orders} />}
       {tab === "products" && <ProductsManager products={products} setProducts={setProducts} />}
       {tab === "slots" && <SlotsManager slots={slots} setSlots={setSlots} />}
@@ -1096,9 +1165,9 @@ function Dashboard({ orders }) {
   );
 }
 
-function OrdersManager({ orders, setOrders, products, slots, customers }) {
+function OrdersManager({ orders, onUpdateStatus, products, slots, customers }) {
   const sorted = [...orders].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  const updateStatus = (id, status) => setOrders(orders.map((o) => (o.id === id ? { ...o, status } : o)));
+  const updateStatus = (id, status) => onUpdateStatus(id, status);
   const findCustomer = (clientToken) => (customers || []).find((c) => c.clientToken === clientToken);
   return (
     <div className="space-y-3">
