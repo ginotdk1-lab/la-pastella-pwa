@@ -165,6 +165,10 @@ async function updateOrderStatus(id, status) {
   const { error } = await supabase.from("orders").update({ status }).eq("id", id);
   if (error) throw error;
 }
+async function deleteOrderRow(id) {
+  const { error } = await supabase.from("orders").delete().eq("id", id);
+  if (error) throw error;
+}
 
 function useAlarm() {
   const audioRef = useRef(null);
@@ -536,6 +540,23 @@ export default function App() {
               }
               lastLocalOrderWrite.current = Date.now();
               setOrders((prev) => prev.map((o) => (o.id === id ? { ...o, status } : o)));
+            }}
+            onDeleteOrder={async (id) => {
+              try {
+                await deleteOrderRow(id);
+              } catch (e) {
+                console.error(e);
+                showToast("Errore: impossibile eliminare l'ordine.");
+                return;
+              }
+              lastLocalOrderWrite.current = Date.now();
+              setOrders((prev) => prev.filter((o) => o.id !== id));
+            }}
+            onDeleteCustomer={async (clientToken) => {
+              const latestCustomers = await loadShared("pastella:customers", []);
+              const next = latestCustomers.filter((c) => c.clientToken !== clientToken);
+              await saveShared("pastella:customers", next);
+              setCustomers(next);
             }}
             customers={customers}
             managerSound={managerSound}
@@ -1072,7 +1093,7 @@ function ManagerLogin({ settings, onSuccess, onCancel }) {
 }
 
 /* ---------- manager panel ---------- */
-function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, onUpdateStatus, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
+function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, onUpdateStatus, onDeleteOrder, onDeleteCustomer, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
   const [tab, setTab] = useState("dashboard");
   const tabs = [
     { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -1101,8 +1122,8 @@ function ManagerPanel({ settings, setSettings, products, setProducts, slots, set
       </div>
 
       {tab === "dashboard" && <Dashboard orders={orders} />}
-      {tab === "orders" && <OrdersManager orders={orders} onUpdateStatus={onUpdateStatus} products={products} slots={slots} customers={customers} />}
-      {tab === "clienti" && <CustomersManager customers={customers} orders={orders} />}
+      {tab === "orders" && <OrdersManager orders={orders} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} products={products} slots={slots} customers={customers} />}
+      {tab === "clienti" && <CustomersManager customers={customers} orders={orders} products={products} slots={slots} onDeleteCustomer={onDeleteCustomer} />}
       {tab === "products" && <ProductsManager products={products} setProducts={setProducts} />}
       {tab === "slots" && <SlotsManager slots={slots} setSlots={setSlots} />}
       {tab === "closures" && <ClosuresManager closures={closures} setClosures={setClosures} />}
@@ -1165,10 +1186,13 @@ function Dashboard({ orders }) {
   );
 }
 
-function OrdersManager({ orders, onUpdateStatus, products, slots, customers }) {
+function OrdersManager({ orders, onUpdateStatus, onDeleteOrder, products, slots, customers }) {
   const sorted = [...orders].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
   const updateStatus = (id, status) => onUpdateStatus(id, status);
   const findCustomer = (clientToken) => (customers || []).find((c) => c.clientToken === clientToken);
+  const remove = (id) => {
+    if (window.confirm("Eliminare definitivamente questo ordine annullato?")) onDeleteOrder(id);
+  };
   return (
     <div className="space-y-3">
       {sorted.length === 0 && <p className="text-sm" style={{ color: "#8A7458" }}>Nessun ordine ricevuto.</p>}
@@ -1192,9 +1216,16 @@ function OrdersManager({ orders, onUpdateStatus, products, slots, customers }) {
               })}
             </div>
             {o.notes && <p className="text-xs italic mb-2" style={{ color: "#8A7458" }}>"{o.notes}"</p>}
-            <select value={o.status} onChange={(e) => updateStatus(o.id, e.target.value)} className="text-xs font-semibold px-2 py-1.5 rounded-lg border" style={{ borderColor: "#E9D8AE" }}>
-              {ORDER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
+            <div className="flex items-center gap-2">
+              <select value={o.status} onChange={(e) => updateStatus(o.id, e.target.value)} className="text-xs font-semibold px-2 py-1.5 rounded-lg border" style={{ borderColor: "#E9D8AE" }}>
+                {ORDER_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+              </select>
+              {o.status === "Annullato" && (
+                <button onClick={() => remove(o.id)} className="text-xs font-semibold px-2.5 py-1.5 rounded-lg flex items-center gap-1" style={{ background: "#F1DCDC", color: "#8C3B3B" }}>
+                  <Trash2 size={12} /> Elimina
+                </button>
+              )}
+            </div>
           </div>
         );
       })}
@@ -1202,24 +1233,85 @@ function OrdersManager({ orders, onUpdateStatus, products, slots, customers }) {
   );
 }
 
-function CustomersManager({ customers, orders }) {
+function CustomersManager({ customers, orders, products, slots, onDeleteCustomer }) {
+  const [selected, setSelected] = useState(null);
   const list = [...(customers || [])].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
-  const countFor = (token) => orders.filter((o) => o.clientToken === token).length;
+  const ordersFor = (token) => orders.filter((o) => o.clientToken === token).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  const countFor = (token) => ordersFor(token).length;
+  const totalFor = (token) => ordersFor(token).reduce((s, o) => s + o.total, 0);
+  const remove = (c) => {
+    if (window.confirm(`Eliminare ${c.nome} ${c.cognome} dalla lista clienti? Gli ordini già fatti resteranno visibili in "Ordini".`)) {
+      onDeleteCustomer(c.clientToken);
+    }
+  };
+
+  if (selected) {
+    const custOrders = ordersFor(selected.clientToken);
+    return (
+      <div>
+        <button onClick={() => setSelected(null)} className="text-xs font-semibold mb-3 flex items-center gap-1" style={{ color: "#8A7458" }}>
+          <ChevronRight size={13} className="rotate-180" /> Torna ai clienti
+        </button>
+        <div className="p-4 rounded-2xl mb-3 flex items-center gap-3" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+          <div className="w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: "#D9A441" }}>
+            <User size={18} color="#4A2E1E" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="font-semibold text-sm truncate">{selected.nome} {selected.cognome}</p>
+            <p className="text-xs" style={{ color: "#8A7458" }}>{selected.telefono} · {selected.eta} anni</p>
+          </div>
+        </div>
+        <div className="grid grid-cols-2 gap-2 mb-4">
+          <div className="p-3 rounded-xl text-center" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+            <p className="text-lg font-bold">{custOrders.length}</p>
+            <p className="text-xs" style={{ color: "#8A7458" }}>Ordini totali</p>
+          </div>
+          <div className="p-3 rounded-xl text-center" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+            <p className="text-lg font-bold">{eur(totalFor(selected.clientToken))}</p>
+            <p className="text-xs" style={{ color: "#8A7458" }}>Speso totale</p>
+          </div>
+        </div>
+        <p className="text-xs font-semibold uppercase tracking-wide mb-2" style={{ color: "#8A7458" }}>Storico ordini</p>
+        <div className="space-y-2">
+          {custOrders.length === 0 && <p className="text-sm" style={{ color: "#8A7458" }}>Nessun ordine ancora.</p>}
+          {custOrders.map((o) => (
+            <div key={o.id} className="p-3 rounded-xl" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+              <div className="flex justify-between mb-1">
+                <p className="text-xs font-semibold">#{o.orderNumber} · {new Date(o.createdAt).toLocaleDateString("it-IT")}</p>
+                <p className="text-xs font-semibold">{eur(o.total)}</p>
+              </div>
+              <div className="text-xs" style={{ color: "#8A7458" }}>
+                {o.items.map((i) => {
+                  const p = products.find((x) => x.id === i.productId);
+                  return <div key={i.productId}>{i.qty} kg × {p?.name}</div>;
+                })}
+              </div>
+              <p className="text-xs mt-1" style={{ color: "#8A7458" }}>Stato: {o.status}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-2">
       {list.length === 0 && <p className="text-sm" style={{ color: "#8A7458" }}>Nessun cliente registrato.</p>}
       {list.map((c) => (
         <div key={c.clientToken} className="p-4 rounded-2xl flex items-center gap-3" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
-          <div className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: "#D9A441" }}>
+          <button onClick={() => setSelected(c)} className="w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0" style={{ background: "#D9A441" }}>
             <User size={16} color="#4A2E1E" />
-          </div>
-          <div className="flex-1 min-w-0">
+          </button>
+          <button onClick={() => setSelected(c)} className="flex-1 min-w-0 text-left">
             <p className="font-semibold text-sm truncate">{c.nome} {c.cognome}</p>
             <p className="text-xs" style={{ color: "#8A7458" }}>{c.telefono} · {c.eta} anni</p>
-          </div>
+          </button>
           <span className="text-xs font-semibold px-2.5 py-1 rounded-full" style={{ background: "#F3E6C4", color: "#8A6A1F" }}>
             {countFor(c.clientToken)} ordini
           </span>
+          <button onClick={() => remove(c)} className="p-1.5 rounded-lg flex-shrink-0" style={{ background: "#F1DCDC" }}>
+            <Trash2 size={13} color="#8C3B3B" />
+          </button>
         </div>
       ))}
     </div>
