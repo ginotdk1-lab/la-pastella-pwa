@@ -856,6 +856,11 @@ function Checkout({ settings, slots, closures, cartDetailed, cartTotal, onBack, 
   const [orders, setOrders] = useState([]);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
+  const [now, setNow] = useState(() => new Date());
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 60000);
+    return () => clearInterval(t);
+  }, []);
 
   useEffect(() => {
     fetchOrders().then(setOrders);
@@ -869,14 +874,19 @@ function Checkout({ settings, slots, closures, cartDetailed, cartTotal, onBack, 
 
   const availableSlots = useMemo(() => {
     if (!form.pickupDate || isClosed) return [];
+    const isToday = form.pickupDate === todayISO();
     return slots
       .filter((s) => s.active)
       .sort((a, b) => a.order - b.order)
       .map((s) => {
         const count = orders.filter((o) => o.pickupDate === form.pickupDate && o.slotId === s.id && o.status !== "Annullato").length;
-        return { ...s, full: count >= s.capacity };
+        const [startH, startM] = s.label.split("-")[0].split(":").map(Number);
+        const slotStart = new Date(form.pickupDate + "T00:00:00");
+        slotStart.setHours(startH, startM, 0, 0);
+        const past = isToday && slotStart <= now;
+        return { ...s, full: count >= s.capacity, past };
       });
-  }, [slots, orders, form.pickupDate, isClosed]);
+  }, [slots, orders, form.pickupDate, isClosed, now]);
 
   const canSubmit = form.customerName.trim() && form.phone.trim() && form.pickupDate && form.slotId && !isClosed;
 
@@ -928,17 +938,17 @@ function Checkout({ settings, slots, closures, cartDetailed, cartTotal, onBack, 
             {availableSlots.map((s) => (
               <button
                 key={s.id}
-                disabled={s.full}
+                disabled={s.full || s.past}
                 onClick={() => setForm({ ...form, slotId: s.id })}
                 className="py-2 rounded-xl text-xs font-mono font-semibold border"
                 style={{
                   borderColor: form.slotId === s.id ? "#4A2E1E" : "#E9D8AE",
-                  background: s.full ? "#F1DCDC" : form.slotId === s.id ? "#4A2E1E" : "#FFFCF6",
-                  color: s.full ? "#8C3B3B" : form.slotId === s.id ? "#FBF3E3" : "#4A2E1E",
-                  opacity: s.full ? 0.7 : 1,
+                  background: (s.full || s.past) ? "#F1DCDC" : form.slotId === s.id ? "#4A2E1E" : "#FFFCF6",
+                  color: (s.full || s.past) ? "#8C3B3B" : form.slotId === s.id ? "#FBF3E3" : "#4A2E1E",
+                  opacity: (s.full || s.past) ? 0.7 : 1,
                 }}
               >
-                {s.label}{s.full ? " · pieno" : ""}
+                {s.label}{s.full ? " · pieno" : s.past ? " · scaduto" : ""}
               </button>
             ))}
             {availableSlots.length === 0 && <p className="col-span-3 text-sm" style={{ color: "#8A7458" }}>Nessuna fascia disponibile.</p>}
