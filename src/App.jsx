@@ -5,7 +5,7 @@ import {
   Clock, CalendarDays, Lock, LayoutDashboard, Package, Timer, CalendarX,
   Settings as SettingsIcon, LogOut, ChevronRight, Check, AlertCircle,
   History, RotateCcw, CalendarPlus, Navigation, BellRing,
-  Users, ImagePlus, User
+  Users, ImagePlus, User, Star
 } from "lucide-react";
 
 /* ---------- helpers ---------- */
@@ -218,6 +218,7 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [products, setProducts] = useState([]);
+  const [featuredProductIds, setFeaturedProductIds] = useState([]);
   const [slots, setSlots] = useState([]);
   const [closures, setClosures] = useState([]);
   const [orders, setOrders] = useState([]);
@@ -239,7 +240,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const [s, p, sl, cl, ord, ct, prof, custs, snd] = await Promise.all([
+      const [s, p, sl, cl, ord, ct, prof, custs, snd, featured] = await Promise.all([
         loadShared("pastella:settings", null),
         loadShared("pastella:products", null),
         loadShared("pastella:slots", null),
@@ -249,9 +250,11 @@ export default function App() {
         loadPersonal("pastella:profile", null),
         loadShared("pastella:customers", []),
         loadPersonal("pastella:managerSound", null),
+        loadShared("pastella:featuredProducts", []),
       ]);
       setSettings(s || (await saveShared("pastella:settings", DEFAULT_SETTINGS)));
       setProducts(p || (await saveShared("pastella:products", SEED_PRODUCTS)));
+      setFeaturedProductIds(Array.isArray(featured) ? featured : []);
       setSlots(sl || (await saveShared("pastella:slots", SEED_SLOTS)));
       setClosures(cl);
       setOrders(ord);
@@ -418,7 +421,7 @@ export default function App() {
       )}
 
       <main className="max-w-3xl mx-auto px-4">
-        {view === "home" && <Home settings={settings} setView={setView} />}
+        {view === "home" && <Home settings={settings} setView={setView} products={products} featuredProductIds={featuredProductIds} />}
         {view === "catalog" && (
           <Catalog products={products} settings={settings} onAdd={addToCart} />
         )}
@@ -525,6 +528,8 @@ export default function App() {
             setSettings={async (s) => setSettings(await saveShared("pastella:settings", s))}
             products={products}
             setProducts={async (p) => setProducts(await saveShared("pastella:products", p))}
+            featuredProductIds={featuredProductIds}
+            setFeaturedProductIds={async (ids) => { await saveShared("pastella:featuredProducts", ids); setFeaturedProductIds(ids); }}
             slots={slots}
             setSlots={async (s) => setSlots(await saveShared("pastella:slots", s))}
             closures={closures}
@@ -682,7 +687,10 @@ function BottomNav({ view, setView }) {
 }
 
 /* ---------- home ---------- */
-function Home({ settings, setView }) {
+function Home({ settings, setView, products, featuredProductIds }) {
+  const featuredProducts = featuredProductIds
+    .map((id) => products.find((p) => p.id === id))
+    .filter((p) => p && p.active !== false && p.available !== false);
   const mapsUrl = `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(settings.address)}`;
   const telUrl = `tel:${settings.phone.replace(/\s+/g, "")}`;
   return (
@@ -695,6 +703,32 @@ function Home({ settings, setView }) {
         <p className="text-sm mb-1" style={{ color: "#8A7458" }}>{settings.description}</p>
         <p className="text-xs font-mono mt-2" style={{ color: "#B3A483" }}>{settings.hours} · Solo ritiro in negozio</p>
       </div>
+
+      {featuredProducts.length > 0 && (
+        <section className="mb-5">
+          <div className="flex items-center gap-2 mb-3">
+            <Star size={17} color="#D9A441" fill="#D9A441" />
+            <h2 className="font-display text-xl font-bold">I più amati</h2>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            {featuredProducts.map((p) => (
+              <button key={p.id} onClick={() => setView("catalog")} className="overflow-hidden rounded-2xl text-left" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+                {p.image ? (
+                  <img src={p.image} alt={p.name} className="w-full h-28 object-cover" />
+                ) : (
+                  <div className="w-full h-28 flex items-center justify-center" style={{ background: "#F5EFDD" }}>
+                    <Wheat size={28} color="#B3A483" />
+                  </div>
+                )}
+                <div className="p-3">
+                  <p className="font-display font-semibold text-sm leading-snug">{p.name}</p>
+                  <p className="text-xs mt-1 font-semibold" style={{ color: "#B5533C" }}>{eur(p.price)} / kg</p>
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       <div className="grid grid-cols-2 gap-3 mb-3">
         <button onClick={() => setView("catalog")} className="col-span-2 py-4 rounded-2xl font-display text-lg font-semibold flex items-center justify-center gap-2" style={{ background: "#4A2E1E", color: "#FBF3E3" }}>
@@ -1103,13 +1137,14 @@ function ManagerLogin({ settings, onSuccess, onCancel }) {
 }
 
 /* ---------- manager panel ---------- */
-function ManagerPanel({ settings, setSettings, products, setProducts, slots, setSlots, closures, setClosures, orders, onUpdateStatus, onDeleteOrder, onDeleteCustomer, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
+function ManagerPanel({ settings, setSettings, products, setProducts, featuredProductIds, setFeaturedProductIds, slots, setSlots, closures, setClosures, orders, onUpdateStatus, onDeleteOrder, onDeleteCustomer, customers, managerSound, setManagerSound, onTestSound, onStopSound, soundPlaying, onLogout }) {
   const [tab, setTab] = useState("dashboard");
   const tabs = [
     { key: "dashboard", label: "Dashboard", icon: LayoutDashboard },
     { key: "orders", label: "Ordini", icon: ShoppingBag },
     { key: "clienti", label: "Clienti", icon: Users },
     { key: "products", label: "Prodotti", icon: Package },
+    { key: "featured", label: "I più amati", icon: Star },
     { key: "slots", label: "Fasce orarie", icon: Timer },
     { key: "closures", label: "Chiusure", icon: CalendarX },
     { key: "settings", label: "Impostazioni", icon: SettingsIcon },
@@ -1135,6 +1170,7 @@ function ManagerPanel({ settings, setSettings, products, setProducts, slots, set
       {tab === "orders" && <OrdersManager orders={orders} onUpdateStatus={onUpdateStatus} onDeleteOrder={onDeleteOrder} products={products} slots={slots} customers={customers} />}
       {tab === "clienti" && <CustomersManager customers={customers} orders={orders} products={products} slots={slots} onDeleteCustomer={onDeleteCustomer} />}
       {tab === "products" && <ProductsManager products={products} setProducts={setProducts} />}
+      {tab === "featured" && <FeaturedProductsManager products={products} featuredProductIds={featuredProductIds} setFeaturedProductIds={setFeaturedProductIds} />}
       {tab === "slots" && <SlotsManager slots={slots} setSlots={setSlots} />}
       {tab === "closures" && <ClosuresManager closures={closures} setClosures={setClosures} />}
       {tab === "settings" && (
@@ -1408,6 +1444,51 @@ function ProductsManager({ products, setProducts }) {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function FeaturedProductsManager({ products, featuredProductIds, setFeaturedProductIds }) {
+  const selected = new Set(featuredProductIds);
+  const toggle = (id) => {
+    const next = selected.has(id)
+      ? featuredProductIds.filter((item) => item !== id)
+      : [...featuredProductIds, id];
+    setFeaturedProductIds(next);
+  };
+  const availableProducts = [...products].sort((a, b) => a.order - b.order);
+
+  return (
+    <div>
+      <div className="p-4 rounded-2xl mb-4" style={{ background: "#FFFCF6", border: "1px solid #E9D8AE" }}>
+        <div className="flex items-center gap-2 mb-2">
+          <Star size={17} color="#D9A441" fill="#D9A441" />
+          <h3 className="font-display text-lg font-bold">Seleziona i prodotti in evidenza</h3>
+        </div>
+        <p className="text-xs" style={{ color: "#8A7458" }}>Scegli manualmente i prodotti da mostrare nella Home, nella sezione «I più amati». Le modifiche vengono salvate automaticamente e sono visibili a tutti i clienti.</p>
+        <p className="text-xs font-semibold mt-3" style={{ color: "#4A2E1E" }}>{featuredProductIds.length} prodotti selezionati</p>
+      </div>
+      <div className="space-y-2">
+        {availableProducts.map((product) => {
+          const checked = selected.has(product.id);
+          return (
+            <label key={product.id} className="flex items-center gap-3 p-3 rounded-xl cursor-pointer" style={{ background: "#FFFCF6", border: `1px solid ${checked ? "#D9A441" : "#E9D8AE"}`, opacity: product.active === false ? 0.55 : 1 }}>
+              <input type="checkbox" checked={checked} onChange={() => toggle(product.id)} className="w-4 h-4 accent-amber-700" />
+              <div className="w-12 h-12 rounded-lg overflow-hidden flex-shrink-0 flex items-center justify-center" style={{ background: "#F5EFDD" }}>
+                {product.image ? <img src={product.image} alt="" className="w-full h-full object-cover" /> : <Wheat size={18} color="#B3A483" />}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="font-semibold text-sm truncate">{product.name}</p>
+                <p className="text-xs" style={{ color: "#8A7458" }}>{eur(product.price)}/kg{product.available === false ? " · Esaurito" : ""}</p>
+              </div>
+              {checked && <Star size={16} color="#D9A441" fill="#D9A441" />}
+            </label>
+          );
+        })}
+      </div>
+      {featuredProductIds.length > 0 && (
+        <button onClick={() => setFeaturedProductIds([])} className="w-full mt-4 py-2.5 rounded-xl text-sm font-semibold" style={{ background: "#F1DCDC", color: "#8C3B3B" }}>Rimuovi tutti dalla Home</button>
+      )}
     </div>
   );
 }
